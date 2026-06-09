@@ -13,6 +13,7 @@ import biz.cunning.cunning_document_scanner.fallback.constants.DefaultSetting
 import biz.cunning.cunning_document_scanner.fallback.constants.DocumentScannerExtra
 import biz.cunning.cunning_document_scanner.fallback.extensions.move
 import biz.cunning.cunning_document_scanner.fallback.extensions.onClick
+import biz.cunning.cunning_document_scanner.fallback.extensions.resizeToMaxDimension
 import biz.cunning.cunning_document_scanner.fallback.extensions.saveToFile
 import biz.cunning.cunning_document_scanner.fallback.extensions.screenHeight
 import biz.cunning.cunning_document_scanner.fallback.extensions.screenWidth
@@ -342,14 +343,23 @@ class DocumentScannerActivity : AppCompatActivity() {
             File(document.originalPhotoFilePath).delete()
 
             // save cropped document photo
+            val outputImage = croppedImage.resizeToMaxDimension(
+                DefaultSetting.CROPPED_IMAGE_MAX_DIMENSION
+            )
             try {
                 val croppedImageFile = FileUtil().createImageFile(this, pageNumber)
-                croppedImage.saveToFile(croppedImageFile, croppedImageQuality)
+                outputImage.saveToFile(croppedImageFile, croppedImageQuality)
                 croppedImageResults.add(Uri.fromFile(croppedImageFile).toString())
             } catch (exception: Exception) {
                 finishIntentWithError(
                     "unable to save cropped image: ${exception.message}"
                 )
+                return
+            } finally {
+                if (outputImage !== croppedImage) {
+                    outputImage.recycle()
+                }
+                croppedImage.recycle()
             }
         }
 

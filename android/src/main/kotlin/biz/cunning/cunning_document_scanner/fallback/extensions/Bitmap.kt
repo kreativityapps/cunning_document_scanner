@@ -3,6 +3,7 @@ package biz.cunning.cunning_document_scanner.fallback.extensions
 import android.graphics.Bitmap
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.max
 import kotlin.math.sqrt
 
 /**
@@ -11,9 +12,22 @@ import kotlin.math.sqrt
  * @param file the bitmap gets saved to this file
  */
 fun Bitmap.saveToFile(file: File, quality: Int) {
-    val fileOutputStream = FileOutputStream(file)
-    compress(Bitmap.CompressFormat.JPEG, quality, fileOutputStream)
-    fileOutputStream.close()
+    FileOutputStream(file).use { fileOutputStream ->
+        compress(Bitmap.CompressFormat.JPEG, quality, fileOutputStream)
+    }
+}
+
+/**
+ * Downscales the bitmap to fit inside maxDimension while keeping aspect ratio.
+ */
+fun Bitmap.resizeToMaxDimension(maxDimension: Int): Bitmap {
+    val longestSide = max(width, height)
+    if (maxDimension <= 0 || longestSide <= maxDimension) return this
+
+    val scale = maxDimension.toDouble() / longestSide.toDouble()
+    val targetWidth = (width * scale).toInt().coerceAtLeast(1)
+    val targetHeight = (height * scale).toInt().coerceAtLeast(1)
+    return Bitmap.createScaledBitmap(this, targetWidth, targetHeight, true)
 }
 
 /**
