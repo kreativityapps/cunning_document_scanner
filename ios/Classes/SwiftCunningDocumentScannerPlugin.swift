@@ -16,52 +16,69 @@ public class SwiftCunningDocumentScannerPlugin: NSObject, FlutterPlugin, VNDocum
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     if call.method == "getPictures" {
-            let presentedVC: UIViewController? = UIApplication.shared.keyWindow?.rootViewController
-            self.resultChannel = result
-            if VNDocumentCameraViewController.isSupported {
-                self.presentingController = VNDocumentCameraViewController()
-                self.presentingController!.delegate = self
-                presentedVC?.present(self.presentingController!, animated: true)
-            } else {
-                result(FlutterError(code: "UNAVAILABLE", message: "Document camera is not available on this device", details: nil))
-            }
-        } else {
-            result(FlutterMethodNotImplemented)
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let presentedVC = windowScene.windows.first?.rootViewController else {
+            result(FlutterError(code: "NO_VIEW_CONTROLLER", message: "No root view controller available", details: nil))
             return
         }
+        self.resultChannel = result
+        if VNDocumentCameraViewController.isSupported {
+            self.presentingController = VNDocumentCameraViewController()
+            if let presentingController = self.presentingController {
+                presentingController.delegate = self
+                presentedVC.present(presentingController, animated: true)
+            } else {
+                result(FlutterError(code: "ERROR", message: "Failed to initialize document camera", details: nil))
+            }
+        } else {
+            result(FlutterError(code: "UNAVAILABLE", message: "Document camera is not available on this device", details: nil))
+        }
+    } else {
+        result(FlutterMethodNotImplemented)
+    }
   }
 
+  func getDocumentsDirectory() -> URL {
+      let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+      return paths[0]
+  }
 
-    func getDocumentsDirectory() -> URL {
-        let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
-        let documentsDirectory = paths[0]
-        return documentsDirectory
-    }
+  public func documentCameraViewController(_ controller: VNDocumentCameraViewController, didFinishWith scan: VNDocumentCameraScan) {
+      let tempDirPath = self.getDocumentsDirectory()
+      let currentDateTime = Date()
+      let df = DateFormatter()
+      df.dateFormat = "yyyyMMdd-HHmmss"
+      let formattedDate = df.string(from: currentDateTime)
+      var filenames: [String] = []
+      for i in 0 ..< scan.pageCount {
+          let page = scan.imageOfPage(at: i)
+          let url = tempDirPath.appendingPathComponent(formattedDate + "-\(i).png")
+          do {
+              try page.pngData()?.write(to: url)
+              filenames.append(url.path)
+          } catch {
+              resultChannel?(FlutterError(code: "FILE_WRITE_ERROR", message: "Failed to write file: \(error.localizedDescription)", details: nil))
+              presentingController?.dismiss(animated: true)
+              return
+          }
+      }
+      resultChannel?(filenames)
+      resultChannel = nil
+      presentingController?.dismiss(animated: true)
+      presentingController = nil
+  }
 
-    public func documentCameraViewController(_ controller: VNDocumentCameraViewController, didFinishWith scan: VNDocumentCameraScan) {
-        let tempDirPath = self.getDocumentsDirectory()
-        let currentDateTime = Date()
-        let df = DateFormatter()
-        df.dateFormat = "yyyyMMdd-HHmmss"
-        let formattedDate = df.string(from: currentDateTime)
-        var filenames: [String] = []
-        for i in 0 ..< scan.pageCount {
-            let page = scan.imageOfPage(at: i)
-            let url = tempDirPath.appendingPathComponent(formattedDate + "-\(i).png")
-            try? page.pngData()?.write(to: url)
-            filenames.append(url.path)
-        }
-        resultChannel?(filenames)
-        presentingController?.dismiss(animated: true)
-    }
+  public func documentCameraViewControllerDidCancel(_ controller: VNDocumentCameraViewController) {
+      resultChannel?(nil)
+      resultChannel = nil
+      presentingController?.dismiss(animated: true)
+      presentingController = nil
+  }
 
-    public func documentCameraViewControllerDidCancel(_ controller: VNDocumentCameraViewController) {
-        resultChannel?(nil)
-        presentingController?.dismiss(animated: true)
-    }
-
-    public func documentCameraViewController(_ controller: VNDocumentCameraViewController, didFailWithError error: Error) {
-        resultChannel?(FlutterError(code: "ERROR", message: error.localizedDescription, details: nil))
-        presentingController?.dismiss(animated: true)
-    }
+  public func documentCameraViewController(_ controller: VNDocumentCameraViewController, didFailWithError error: Error) {
+      resultChannel?(FlutterError(code: "ERROR", message: error.localizedDescription, details: nil))
+      resultChannel = nil
+      presentingController?.dismiss(animated: true)
+      presentingController = nil
+  }
 }

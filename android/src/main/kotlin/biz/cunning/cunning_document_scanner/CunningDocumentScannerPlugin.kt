@@ -10,7 +10,7 @@ import biz.cunning.cunning_document_scanner.fallback.constants.DocumentScannerEx
 import com.google.mlkit.common.MlKitException
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.RESULT_FORMAT_JPEG
-import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.SCANNER_MODE_FULL
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.SCANNER_MODE_BASE
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -174,33 +174,50 @@ class CunningDocumentScannerPlugin : FlutterPlugin, MethodCallHandler, ActivityA
             .setGalleryImportAllowed(isGalleryImportAllowed)
             .setPageLimit(noOfPages)
             .setResultFormats(RESULT_FORMAT_JPEG)
-            .setScannerMode(SCANNER_MODE_FULL)
+            .setScannerMode(SCANNER_MODE_BASE)
             .build()
-        val scanner = GmsDocumentScanning.getClient(options)
-        scanner.getStartScanIntent(activity).addOnSuccessListener {
-            try {
-                // Use a custom request code for onActivityResult identification
-                activity.startIntentSenderForResult(it, START_DOCUMENT_ACTIVITY, null, 0, 0, 0)
 
-            } catch (e: IntentSender.SendIntentException) {
-                pendingResult?.error("ERROR", "Failed to start document scanner", null)
-            }
-        }.addOnFailureListener {
-            if (it is MlKitException) {
-                val intent = createDocumentScanIntent(noOfPages)
+        val scanner = GmsDocumentScanning.getClient(options)
+
+        scanner.getStartScanIntent(activity)
+            .addOnSuccessListener { intentSender ->
                 try {
-                    ActivityCompat.startActivityForResult(
-                        this.activity,
-                        intent,
-                        START_DOCUMENT_FB_ACTIVITY,
-                        null
+                    activity.startIntentSenderForResult(
+                        intentSender,
+                        START_DOCUMENT_ACTIVITY,
+                        null,
+                        0,
+                        0,
+                        0
                     )
+                } catch (e: IntentSender.SendIntentException) {
+                    pendingResult?.error("ERROR", "Failed to start document scanner", null)
                 } catch (e: ActivityNotFoundException) {
-                    pendingResult?.error("ERROR", "FAILED TO START ACTIVITY", null)
+                    // GMS says it supports scanning, but no activity is available
+                    launchFallbackScanner(noOfPages)
                 }
-            } else {
-                pendingResult?.error("ERROR", "Failed to start document scanner Intent", null)
             }
+            .addOnFailureListener {
+                if (it is MlKitException) {
+                    // Explicit "not supported" → fallback
+                    launchFallbackScanner(noOfPages)
+                } else {
+                    pendingResult?.error("ERROR", "Failed to start document scanner Intent", null)
+                }
+            }
+    }
+
+    private fun launchFallbackScanner(noOfPages: Int) {
+        val intent = createDocumentScanIntent(noOfPages)
+        try {
+            ActivityCompat.startActivityForResult(
+                this.activity,
+                intent,
+                START_DOCUMENT_FB_ACTIVITY,
+                null
+            )
+        } catch (e: ActivityNotFoundException) {
+            pendingResult?.error("ERROR", "FAILED TO START FALLBACK ACTIVITY", null)
         }
     }
 
