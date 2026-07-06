@@ -1,3 +1,7 @@
+## Unreleased
+* Migrate Android Gradle setup to Flutter built-in Kotlin.
+* Require Flutter 3.44.0 and Dart 3.12.0 or newer.
+
 ## 1.2.2
 * Fix bitmap exception crash on Android (thanks to rosenberg_ptr)
 
