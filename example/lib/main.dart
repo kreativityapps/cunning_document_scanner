@@ -8,7 +8,7 @@ void main() {
 }
 
 class MyApp extends StatefulWidget {
-  const MyApp({Key? key}) : super(key: key);
+  const MyApp({super.key});
 
   @override
   State<MyApp> createState() => _MyAppState();
@@ -30,17 +30,18 @@ class _MyAppState extends State<MyApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       home: Scaffold(
-        appBar: AppBar(
-          title: const Text('Plugin example app'),
-        ),
+        appBar: AppBar(title: const Text('Plugin example app')),
         body: SingleChildScrollView(
-            child: Column(
-          children: [
-            ElevatedButton(
-                onPressed: onPressed, child: const Text("Add Pictures")),
-            for (var picture in _pictures) Image.file(File(picture))
-          ],
-        )),
+          child: Column(
+            children: [
+              ElevatedButton(
+                onPressed: onPressed,
+                child: const Text("Add Pictures"),
+              ),
+              for (var picture in _pictures) Image.file(File(picture)),
+            ],
+          ),
+        ),
       ),
     );
   }
