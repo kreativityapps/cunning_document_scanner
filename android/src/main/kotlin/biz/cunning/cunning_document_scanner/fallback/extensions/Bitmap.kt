@@ -3,6 +3,7 @@ package biz.cunning.cunning_document_scanner.fallback.extensions
 import android.graphics.Bitmap
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import kotlin.math.max
 import kotlin.math.sqrt
 
@@ -13,7 +14,9 @@ import kotlin.math.sqrt
  */
 fun Bitmap.saveToFile(file: File, quality: Int) {
     FileOutputStream(file).use { fileOutputStream ->
-        compress(Bitmap.CompressFormat.JPEG, quality, fileOutputStream)
+        if (!compress(Bitmap.CompressFormat.JPEG, quality, fileOutputStream)) {
+            throw IOException("Failed to encode document as JPEG")
+        }
     }
 }
 

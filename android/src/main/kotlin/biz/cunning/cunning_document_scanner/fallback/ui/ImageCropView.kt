@@ -79,7 +79,7 @@ class ImageCropView(context: Context, attrs: AttributeSet) : AppCompatImageView(
     /**
      * @property corners document corners in image preview coordinates
      */
-    val corners: Quad get() = quad!!
+    val corners: Quad get() = requireNotNull(quad) { "Crop preview is not ready" }
 
     /**
      * @property imagePreviewMaxSizeInBytes if the photo is too big, we need to scale it down
@@ -109,18 +109,12 @@ class ImageCropView(context: Context, attrs: AttributeSet) : AppCompatImageView(
             R.dimen.buttons_container_min_height
         ).toInt()
 
-        imagePreviewHeight = if (photo.height > photo.width) {
-            // if user takes the photo in portrait
-            (screenWidth.toFloat() / imageRatio).toInt()
-        } else {
-            // if user takes the photo in landscape
-            (screenWidth.toFloat() * imageRatio).toInt()
-        }
+        imagePreviewHeight = (screenWidth.toFloat() / imageRatio).toInt().coerceAtLeast(1)
 
         // set a cap on imagePreviewHeight, so that the bottom buttons container isn't hidden
         imagePreviewHeight = Integer.min(
             imagePreviewHeight,
-            screenHeight - buttonsViewMinHeight
+            (screenHeight - buttonsViewMinHeight).coerceAtLeast(1)
         )
 
         imagePreviewWidth = screenWidth
@@ -144,6 +138,14 @@ class ImageCropView(context: Context, attrs: AttributeSet) : AppCompatImageView(
         }
         this.setImageBitmap(previewImagePhoto)
         this.onSetImage()
+    }
+
+    fun clearImage() {
+        quad = null
+        prevTouchPoint = null
+        closestCornerToTouch = null
+        cropperSelectedCornerFillStyles.shader = null
+        setImageDrawable(null)
     }
 
     /**
@@ -227,10 +229,10 @@ class ImageCropView(context: Context, attrs: AttributeSet) : AppCompatImageView(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        if (quad !== null) {
+        quad?.let { currentQuad ->
             // draw 4 corners and connecting lines
             canvas.drawQuad(
-                quad!!,
+                currentQuad,
                 resources.getDimension(R.dimen.cropper_corner_radius),
                 cropperLinesAndCornersStyles,
                 cropperSelectedCornerFillStyles,
@@ -252,6 +254,8 @@ class ImageCropView(context: Context, attrs: AttributeSet) : AppCompatImageView(
      */
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        val currentQuad = quad ?: return false
+        if (!isEnabled) return false
         // keep track of the touched point
         val touchPoint = PointF(event.x, event.y)
 
@@ -260,25 +264,28 @@ class ImageCropView(context: Context, attrs: AttributeSet) : AppCompatImageView(
                 // when the user touches the screen record the point, and find the closest
                 // corner to the touch point
                 prevTouchPoint = touchPoint
-                closestCornerToTouch = quad!!.getCornerClosestToPoint(touchPoint)
+                closestCornerToTouch = currentQuad.getCornerClosestToPoint(touchPoint)
             }
-            MotionEvent.ACTION_UP -> {
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 // when the user stops touching the screen reset these values
                 prevTouchPoint = null
                 closestCornerToTouch = null
             }
             MotionEvent.ACTION_MOVE -> {
                 // when the user drags their finger, update the closest corner position
-                val touchMoveXDistance = touchPoint.x - prevTouchPoint!!.x
-                val touchMoveYDistance = touchPoint.y - prevTouchPoint!!.y
+                val previousPoint = prevTouchPoint ?: return false
+                val corner = closestCornerToTouch ?: return false
+                val cornerPoint = currentQuad.corners[corner] ?: return false
+                val touchMoveXDistance = touchPoint.x - previousPoint.x
+                val touchMoveYDistance = touchPoint.y - previousPoint.y
                 val cornerNewPosition = PointF(
-                    quad!!.corners[closestCornerToTouch]!!.x + touchMoveXDistance,
-                    quad!!.corners[closestCornerToTouch]!!.y + touchMoveYDistance
+                    cornerPoint.x + touchMoveXDistance,
+                    cornerPoint.y + touchMoveYDistance
                 )
 
                 // make sure the user doesn't drag the corner outside the image preview container
                 if (isPointInsideImage(cornerNewPosition)) {
-                    quad!!.moveCorner(closestCornerToTouch!!, touchMoveXDistance, touchMoveYDistance)
+                    currentQuad.moveCorner(corner, touchMoveXDistance, touchMoveYDistance)
                 }
 
                 // record the point touched, so we can use it to calculate how far to move corner

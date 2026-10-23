@@ -9,6 +9,8 @@ public class CunningDocumentScannerPlugin: NSObject, FlutterPlugin,
     var resultChannel: FlutterResult?
     var presentingController: VNDocumentCameraViewController?
     var maxPageCount: Int = 100
+    private var isFinishing = false
+    private var activeScanID: UUID?
     let outputMaxDimension: CGFloat = 2048
     let outputJpegQuality: CGFloat = 0.82
     let outputQueue = DispatchQueue(
@@ -31,48 +33,52 @@ public class CunningDocumentScannerPlugin: NSObject, FlutterPlugin,
             return
         }
 
+        guard resultChannel == nil else {
+            result(FlutterError(
+                code: "ALREADY_ACTIVE",
+                message: "A document scan is already in progress",
+                details: nil
+            ))
+            return
+        }
+
         let arguments = call.arguments as? [String: Any]
         let rawPageCount = arguments?["noOfPages"]
         let requestedPageCount = rawPageCount as? Int
             ?? (rawPageCount as? NSNumber)?.intValue
             ?? 100
-        maxPageCount = max(1, requestedPageCount)
-
-        guard let presentedVC = rootViewController else {
-            result(
-                FlutterError(
-                    code: "NO_VIEW_CONTROLLER",
-                    message: "No root view controller available",
-                    details: nil
-                )
-            )
+        guard requestedPageCount > 0 else {
+            result(FlutterError(code: "INVALID_ARGUMENT", message: "noOfPages must be positive", details: nil))
             return
         }
 
-        resultChannel = result
-        if VNDocumentCameraViewController.isSupported {
-            presentingController = VNDocumentCameraViewController()
-            if let presentingController = presentingController {
-                presentingController.delegate = self
-                presentedVC.present(presentingController, animated: true)
-            } else {
-                result(
-                    FlutterError(
-                        code: "ERROR",
-                        message: "Failed to initialize document camera",
-                        details: nil
-                    )
-                )
-            }
-        } else {
-            result(
-                FlutterError(
-                    code: "UNAVAILABLE",
-                    message: "Document camera is not available on this device",
-                    details: nil
-                )
-            )
+        guard let presentedVC = rootViewController,
+              presentedVC.viewIfLoaded?.window != nil,
+              !presentedVC.isBeingDismissed,
+              !presentedVC.isBeingPresented else {
+            result(FlutterError(
+                code: "NO_VIEW_CONTROLLER",
+                message: "No view controller available to present the document camera",
+                details: nil
+            ))
+            return
         }
+        guard VNDocumentCameraViewController.isSupported else {
+            result(FlutterError(
+                code: "UNAVAILABLE",
+                message: "Document camera is not available on this device",
+                details: nil
+            ))
+            return
+        }
+
+        let controller = VNDocumentCameraViewController()
+        controller.delegate = self
+        maxPageCount = requestedPageCount
+        resultChannel = result
+        activeScanID = UUID()
+        presentingController = controller
+        presentedVC.present(controller, animated: true)
     }
 
     var rootViewController: UIViewController? {
@@ -80,7 +86,11 @@ public class CunningDocumentScannerPlugin: NSObject, FlutterPlugin,
             .compactMap { $0 as? UIWindowScene }
             .flatMap { $0.windows }
             .first { $0.isKeyWindow }
-        return keyWindow?.rootViewController
+        var controller = keyWindow?.rootViewController
+        while let presented = controller?.presentedViewController {
+            controller = presented
+        }
+        return controller
     }
 
     func getDocumentsDirectory() -> URL {
@@ -91,8 +101,8 @@ public class CunningDocumentScannerPlugin: NSObject, FlutterPlugin,
     }
 
     func boundedImage(_ image: UIImage) -> UIImage {
-        let width = image.size.width
-        let height = image.size.height
+        let width = image.size.width * image.scale
+        let height = image.size.height * image.scale
         let longestSide = max(width, height)
         if longestSide <= outputMaxDimension {
             return image
@@ -108,62 +118,82 @@ public class CunningDocumentScannerPlugin: NSObject, FlutterPlugin,
         }
     }
 
+    // Keep the callback active through dismissal and export without retaining the dismissed
+    // scanner UI. Request identity prevents a late completion from finishing a later scan.
+    private func complete(_ value: Any?, scanID: UUID) {
+        guard activeScanID == scanID, let result = resultChannel else { return }
+        resultChannel = nil
+        activeScanID = nil
+        presentingController = nil
+        isFinishing = false
+        result(value)
+    }
+
+    private func dismissAndComplete(_ value: Any?, controller: VNDocumentCameraViewController) {
+        guard let scanID = activeScanID else { return }
+        isFinishing = true
+        controller.dismiss(animated: true) {
+            self.complete(value, scanID: scanID)
+        }
+    }
+
     public func documentCameraViewController(
         _ controller: VNDocumentCameraViewController,
         didFinishWith scan: VNDocumentCameraScan
     ) {
-        let tempDirPath = getDocumentsDirectory()
-        let currentDateTime = Date()
-        let df = DateFormatter()
-        df.dateFormat = "yyyyMMdd-HHmmss"
-        let formattedDate = df.string(from: currentDateTime)
+        guard presentingController === controller, resultChannel != nil, !isFinishing,
+              let scanID = activeScanID else { return }
+        isFinishing = true
+        let directory = getDocumentsDirectory()
         let pageCount = min(scan.pageCount, maxPageCount)
-        let result = resultChannel
-        let controllerToDismiss = presentingController ?? controller
-        resultChannel = nil
-        presentingController = nil
-        controllerToDismiss.dismiss(animated: true)
 
-        outputQueue.async { [self] in
-            var filenames: [String] = []
-            var flutterError: FlutterError?
-            for i in 0 ..< pageCount {
-                autoreleasepool {
-                    let page = boundedImage(scan.imageOfPage(at: i))
-                    let url = tempDirPath.appendingPathComponent(
-                        formattedDate + "-\(i).jpg"
-                    )
-                    guard let imageData = page.jpegData(
-                        compressionQuality: outputJpegQuality
-                    ) else {
-                        flutterError = FlutterError(
-                            code: "IMAGE_ENCODING_ERROR",
-                            message: "Failed to encode image",
-                            details: nil
-                        )
-                        return
+        controller.dismiss(animated: true) {
+            self.presentingController = nil
+            self.outputQueue.async { [self] in
+                var filenames: [String] = []
+                var createdURLs: [URL] = []
+                var flutterError: FlutterError?
+                if pageCount == 0 {
+                    flutterError = FlutterError(code: "ERROR", message: "No scanned images returned", details: nil)
+                }
+                for i in 0 ..< pageCount {
+                    autoreleasepool {
+                        let page = boundedImage(scan.imageOfPage(at: i))
+                        let url = directory.appendingPathComponent("\(scanID.uuidString)-\(i).jpg")
+                        guard let imageData = page.jpegData(compressionQuality: outputJpegQuality) else {
+                            flutterError = FlutterError(
+                                code: "IMAGE_ENCODING_ERROR",
+                                message: "Failed to encode image",
+                                details: nil
+                            )
+                            return
+                        }
+                        // Include the current target so a failed write cannot leave a partial file.
+                        createdURLs.append(url)
+                        do {
+                            try imageData.write(to: url, options: .atomic)
+                            filenames.append(url.path)
+                        } catch {
+                            flutterError = FlutterError(
+                                code: "FILE_WRITE_ERROR",
+                                message: "Failed to write file: \(error.localizedDescription)",
+                                details: nil
+                            )
+                        }
                     }
-                    do {
-                        try imageData.write(to: url)
-                        filenames.append(url.path)
-                    } catch {
-                        flutterError = FlutterError(
-                            code: "FILE_WRITE_ERROR",
-                            message: "Failed to write file: \(error.localizedDescription)",
-                            details: nil
-                        )
-                    }
+                    if flutterError != nil { break }
                 }
                 if flutterError != nil {
-                    break
+                    for url in createdURLs {
+                        try? FileManager.default.removeItem(at: url)
+                    }
                 }
-            }
-
-            DispatchQueue.main.async {
-                if let flutterError = flutterError {
-                    result?(flutterError)
-                } else {
-                    result?(filenames)
+                DispatchQueue.main.async {
+                    if let flutterError = flutterError {
+                        self.complete(flutterError, scanID: scanID)
+                    } else {
+                        self.complete(filenames, scanID: scanID)
+                    }
                 }
             }
         }
@@ -172,25 +202,19 @@ public class CunningDocumentScannerPlugin: NSObject, FlutterPlugin,
     public func documentCameraViewControllerDidCancel(
         _ controller: VNDocumentCameraViewController
     ) {
-        resultChannel?(nil)
-        resultChannel = nil
-        presentingController?.dismiss(animated: true)
-        presentingController = nil
+        guard presentingController === controller, resultChannel != nil, !isFinishing else { return }
+        dismissAndComplete(nil, controller: controller)
     }
 
     public func documentCameraViewController(
         _ controller: VNDocumentCameraViewController,
         didFailWithError error: Error
     ) {
-        resultChannel?(
-            FlutterError(
-                code: "ERROR",
-                message: error.localizedDescription,
-                details: nil
-            )
-        )
-        resultChannel = nil
-        presentingController?.dismiss(animated: true)
-        presentingController = nil
+        guard presentingController === controller, resultChannel != nil, !isFinishing else { return }
+        dismissAndComplete(FlutterError(
+            code: "ERROR",
+            message: error.localizedDescription,
+            details: nil
+        ), controller: controller)
     }
 }

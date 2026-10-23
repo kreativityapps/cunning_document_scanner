@@ -18,222 +18,207 @@ import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugin.common.PluginRegistry
 
-
 /** CunningDocumentScannerPlugin */
-class CunningDocumentScannerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
-    private var delegate: PluginRegistry.ActivityResultListener? = null
+class CunningDocumentScannerPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, ActivityAware {
     private var binding: ActivityPluginBinding? = null
+    private var activity: Activity? = null
     private var pendingResult: Result? = null
-    private lateinit var activity: Activity
-    private val START_DOCUMENT_ACTIVITY: Int = 0x362738
-    private val START_DOCUMENT_FB_ACTIVITY: Int = 0x362737
-
-
-    /// The MethodChannel that will the communication between Flutter and native Android
-    ///
-    /// This local reference serves to register the plugin with the Flutter Engine and unregister it
-    /// when the Flutter Engine is detached from the Activity
+    private var scanId = 0L
+    private var requestCode = 0x3600
+    private var pendingRequestCode: Int? = null
+    private var usingFallback = false
+    private var deferredLaunch: (() -> Unit)? = null
     private lateinit var channel: MethodChannel
 
-    override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
-        channel = MethodChannel(flutterPluginBinding.binaryMessenger, "cunning_document_scanner")
+    private val resultListener = PluginRegistry.ActivityResultListener { code, resultCode, data ->
+        if (code != pendingRequestCode || pendingResult == null) {
+            false
+        } else {
+            try {
+                when (resultCode) {
+                    Activity.RESULT_CANCELED -> complete(emptyList())
+                    Activity.RESULT_OK -> {
+                        val error = data?.getStringExtra("error")
+                        if (error != null) {
+                            fail("ERROR", error)
+                        } else {
+                            val paths = if (usingFallback) {
+                                data?.getStringArrayListExtra("croppedImageResults")
+                                    ?.map { it.removePrefix("file://") }
+                            } else {
+                                GmsDocumentScanningResult.fromActivityResultIntent(data)
+                                    ?.pages?.map { it.imageUri.toString().removePrefix("file://") }
+                            }
+                            if (paths.isNullOrEmpty() || paths.any { it.isBlank() }) {
+                                fail("ERROR", "No scanned images returned")
+                            } else {
+                                complete(paths)
+                            }
+                        }
+                    }
+                    else -> fail("ERROR", "Unexpected document scanner result: $resultCode")
+                }
+            } catch (exception: Exception) {
+                fail("ERROR", "Unable to read document scanner result: ${exception.localizedMessage}")
+            }
+            true
+        }
+    }
+
+    override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        channel = MethodChannel(binding.binaryMessenger, "cunning_document_scanner")
         channel.setMethodCallHandler(this)
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
-        if (call.method == "getPictures") {
-            val noOfPages = call.argument<Int>("noOfPages") ?: 50;
-            val isGalleryImportAllowed = call.argument<Boolean>("isGalleryImportAllowed") ?: false;
-            this.pendingResult = result
-            startScan(noOfPages, isGalleryImportAllowed)
-        } else {
+        if (call.method != "getPictures") {
             result.notImplemented()
+            return
+        }
+        if (pendingResult != null) {
+            result.error("ALREADY_ACTIVE", "A document scan is already in progress", null)
+            return
+        }
+        val noOfPages = call.argument<Int>("noOfPages") ?: 50
+        if (noOfPages <= 0) {
+            result.error("INVALID_ARGUMENT", "noOfPages must be positive", null)
+            return
+        }
+        val currentActivity = activity
+        if (currentActivity == null || currentActivity.isFinishing || currentActivity.isDestroyed) {
+            result.error("NO_ACTIVITY", "Plugin is not attached to an active Activity", null)
+            return
+        }
+
+        pendingResult = result
+        scanId += 1
+        // A late Activity result from an abandoned scan must not finish a newer request.
+        requestCode = if (requestCode >= 0x7fff) 0x3600 else requestCode + 1
+        pendingRequestCode = requestCode
+        usingFallback = false
+        startScan(scanId, noOfPages, call.argument<Boolean>("isGalleryImportAllowed") ?: false)
+    }
+
+    private fun complete(paths: List<String>? = null, errorCode: String? = null, message: String? = null) {
+        val result = pendingResult ?: return
+        pendingResult = null
+        pendingRequestCode = null
+        deferredLaunch = null
+        usingFallback = false
+        if (errorCode == null) result.success(paths) else result.error(errorCode, message, null)
+    }
+
+    private fun fail(code: String, message: String) {
+        complete(errorCode = code, message = message)
+    }
+
+    private fun isCurrentScan(id: Long): Boolean = pendingResult != null && scanId == id
+
+    private fun whenAttached(id: Long, launch: (Activity) -> Unit) {
+        if (!isCurrentScan(id)) return
+        val currentActivity = activity
+        if (currentActivity == null || currentActivity.isChangingConfigurations) {
+            // Configuration changes detach briefly. Resume the prepared launch after reattachment.
+            deferredLaunch = { whenAttached(id, launch) }
+        } else if (currentActivity.isFinishing || currentActivity.isDestroyed) {
+            fail("NO_ACTIVITY", "The document scanner Activity is no longer available")
+        } else {
+            launch(currentActivity)
         }
     }
 
+    private fun startScan(id: Long, noOfPages: Int, isGalleryImportAllowed: Boolean) {
+        whenAttached(id) { currentActivity ->
+            try {
+                val options = GmsDocumentScannerOptions.Builder()
+                    .setGalleryImportAllowed(isGalleryImportAllowed)
+                    .setPageLimit(noOfPages)
+                    .setResultFormats(RESULT_FORMAT_JPEG)
+                    .setScannerMode(SCANNER_MODE_BASE)
+                    .build()
+                GmsDocumentScanning.getClient(options).getStartScanIntent(currentActivity)
+                    .addOnSuccessListener { intentSender ->
+                        whenAttached(id) launch@ { launchActivity ->
+                            val code = pendingRequestCode ?: return@launch
+                            try {
+                                launchActivity.startIntentSenderForResult(intentSender, code, null, 0, 0, 0)
+                            } catch (_: ActivityNotFoundException) {
+                                launchFallbackScanner(id, noOfPages)
+                            } catch (_: IntentSender.SendIntentException) {
+                                fail("ERROR", "Failed to start document scanner")
+                            } catch (exception: Exception) {
+                                fail("ERROR", "Failed to launch document scanner: ${exception.localizedMessage}")
+                            }
+                        }
+                    }
+                    .addOnFailureListener { error ->
+                        if (isCurrentScan(id)) {
+                            if (error is MlKitException) {
+                                launchFallbackScanner(id, noOfPages)
+                            } else {
+                                fail("ERROR", "Failed to prepare document scanner: ${error.localizedMessage}")
+                            }
+                        }
+                    }
+            } catch (_: ActivityNotFoundException) {
+                launchFallbackScanner(id, noOfPages)
+            } catch (exception: Exception) {
+                fail("ERROR", "Failed to prepare document scanner: ${exception.localizedMessage}")
+            }
+        }
+    }
 
-    override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        channel.setMethodCallHandler(null)
+    private fun launchFallbackScanner(id: Long, noOfPages: Int) {
+        whenAttached(id) { currentActivity ->
+            val code = pendingRequestCode ?: return@whenAttached
+            val intent = Intent(currentActivity, DocumentScannerActivity::class.java)
+                .putExtra(DocumentScannerExtra.EXTRA_MAX_NUM_DOCUMENTS, noOfPages)
+            usingFallback = true
+            try {
+                ActivityCompat.startActivityForResult(currentActivity, intent, code, null)
+            } catch (exception: Exception) {
+                fail("ERROR", "Failed to start fallback scanner: ${exception.localizedMessage}")
+            }
+        }
     }
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
-        this.activity = binding.activity
-
-        addActivityResultListener(binding)
-    }
-
-    private fun addActivityResultListener(binding: ActivityPluginBinding) {
+        removeActivityResultListener()
         this.binding = binding
-        if (this.delegate == null) {
-            this.delegate = PluginRegistry.ActivityResultListener { requestCode, resultCode, data ->
-                if (requestCode != START_DOCUMENT_ACTIVITY && requestCode != START_DOCUMENT_FB_ACTIVITY) {
-                    return@ActivityResultListener false
-                }
-                var handled = false
-                if (requestCode == START_DOCUMENT_ACTIVITY) {
-                    when (resultCode) {
-                        Activity.RESULT_OK -> {
-                            // check for errors
-                            val error = data?.extras?.getString("error")
-                            if (error != null) {
-                                pendingResult?.error("ERROR", "error - $error", null)
-                            } else {
-                                // get an array with scanned document file paths
-                                val scanningResult: GmsDocumentScanningResult =
-                                    data?.extras?.getParcelable("extra_scanning_result")
-                                        ?: return@ActivityResultListener false
-
-                                val successResponse = scanningResult.pages?.map {
-                                    it.imageUri.toString().removePrefix("file://")
-                                }?.toList()
-                                // trigger the success event handler with an array of cropped images
-                                pendingResult?.success(successResponse)
-                            }
-                            handled = true
-                        }
-
-                        Activity.RESULT_CANCELED -> {
-                            // user closed camera
-                            pendingResult?.success(emptyList<String>())
-                            handled = true
-                        }
-                    }
-                } else {
-                    when (resultCode) {
-                        Activity.RESULT_OK -> {
-                            // check for errors
-                            val error = data?.extras?.getString("error")
-                            if (error != null) {
-                                pendingResult?.error("ERROR", "error - $error", null)
-                            } else {
-                                // get an array with scanned document file paths
-                                val croppedImageResults =
-                                    data?.getStringArrayListExtra("croppedImageResults")?.toList()
-                                        ?: let {
-                                            pendingResult?.error("ERROR", "No cropped images returned", null)
-                                            return@ActivityResultListener true
-                                        }
-
-                                // return a list of file paths
-                                // removing file uri prefix as Flutter file will have problems with it
-                                val successResponse = croppedImageResults.map {
-                                    it.removePrefix("file://")
-                                }.toList()
-                                // trigger the success event handler with an array of cropped images
-                                pendingResult?.success(successResponse)
-                            }
-                            handled = true
-                        }
-
-                        Activity.RESULT_CANCELED -> {
-                            // user closed camera
-                            pendingResult?.success(emptyList<String>())
-                            handled = true
-                        }
-                    }
-                }
-
-                if (handled) {
-                    // Clear the pending result to avoid reuse
-                    pendingResult = null
-                }
-                return@ActivityResultListener handled
-            }
-        } else {
-            binding.removeActivityResultListener(this.delegate!!)
-        }
-
-        binding.addActivityResultListener(delegate!!)
-    }
-
-
-    /**
-     * create intent to launch document scanner and set custom options
-     */
-    private fun createDocumentScanIntent(noOfPages: Int): Intent {
-        val documentScanIntent = Intent(activity, DocumentScannerActivity::class.java)
-
-        documentScanIntent.putExtra(
-            DocumentScannerExtra.EXTRA_MAX_NUM_DOCUMENTS,
-            noOfPages
-        )
-
-        return documentScanIntent
-    }
-
-
-    /**
-     * add document scanner result handler and launch the document scanner
-     */
-    private fun startScan(noOfPages: Int, isGalleryImportAllowed: Boolean) {
-        val options = GmsDocumentScannerOptions.Builder()
-            .setGalleryImportAllowed(isGalleryImportAllowed)
-            .setPageLimit(noOfPages)
-            .setResultFormats(RESULT_FORMAT_JPEG)
-            .setScannerMode(SCANNER_MODE_BASE)
-            .build()
-
-        val scanner = GmsDocumentScanning.getClient(options)
-
-        scanner.getStartScanIntent(activity)
-            .addOnSuccessListener { intentSender ->
-                try {
-                    activity.startIntentSenderForResult(
-                        intentSender,
-                        START_DOCUMENT_ACTIVITY,
-                        null,
-                        0,
-                        0,
-                        0
-                    )
-                } catch (e: IntentSender.SendIntentException) {
-                    pendingResult?.error("ERROR", "Failed to start document scanner", null)
-                } catch (e: ActivityNotFoundException) {
-                    // GMS says it supports scanning, but no activity is available
-                    launchFallbackScanner(noOfPages)
-                }
-            }
-            .addOnFailureListener {
-                if (it is MlKitException) {
-                    // Explicit "not supported" → fallback
-                    launchFallbackScanner(noOfPages)
-                } else {
-                    pendingResult?.error("ERROR", "Failed to start document scanner Intent", null)
-                }
-            }
-    }
-
-    private fun launchFallbackScanner(noOfPages: Int) {
-        val intent = createDocumentScanIntent(noOfPages)
-        try {
-            ActivityCompat.startActivityForResult(
-                this.activity,
-                intent,
-                START_DOCUMENT_FB_ACTIVITY,
-                null
-            )
-        } catch (e: ActivityNotFoundException) {
-            pendingResult?.error("ERROR", "FAILED TO START FALLBACK ACTIVITY", null)
-        }
+        activity = binding.activity
+        binding.addActivityResultListener(resultListener)
+        val launch = deferredLaunch
+        deferredLaunch = null
+        launch?.invoke()
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
-
+        removeActivityResultListener()
+        activity = null
     }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
-        addActivityResultListener(binding)
+        onAttachedToActivity(binding)
     }
 
     override fun onDetachedFromActivity() {
         removeActivityResultListener()
+        activity = null
+        fail("NO_ACTIVITY", "Activity detached during document scan")
+    }
+
+    override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        fail("NO_ACTIVITY", "Flutter engine detached during document scan")
+        removeActivityResultListener()
+        activity = null
+        channel.setMethodCallHandler(null)
     }
 
     private fun removeActivityResultListener() {
-        this.delegate?.let { this.binding?.removeActivityResultListener(it) }
+        binding?.removeActivityResultListener(resultListener)
+        binding = null
     }
 }

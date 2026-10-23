@@ -2,7 +2,6 @@ package biz.cunning.cunning_document_scanner.fallback.utils
 
 import android.app.Activity
 import android.content.Intent
-import android.net.Uri
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.result.ActivityResult
@@ -22,12 +21,18 @@ import java.io.IOException
 class CameraUtil(
     private val activity: ComponentActivity,
     private val onPhotoCaptureSuccess: (photoFilePath: String) -> Unit,
-    private val onCancelPhoto: () -> Unit
+    private val onCancelPhoto: () -> Unit,
+    private val onPhotoFileCreated: (File) -> Unit,
+    private val onPhotoCaptureError: (String) -> Unit
 ) {
     /**
      * @property photoFilePath the photo file path
      */
-    private lateinit var photoFilePath: String
+    private var photoFilePath: String? = null
+
+    fun restorePendingPhoto(path: String?) {
+        photoFilePath = path
+    }
 
     /**
      * @property startForResult used to launch camera
@@ -35,15 +40,18 @@ class CameraUtil(
     private val startForResult = activity.registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result: ActivityResult ->
-        when (result.resultCode) {
-            Activity.RESULT_OK -> {
-                // send back photo file path on capture success
-                onPhotoCaptureSuccess(photoFilePath)
-            }
-            Activity.RESULT_CANCELED -> {
-                // delete the photo since the user didn't finish taking the photo
-                File(photoFilePath).delete()
+        val path = photoFilePath
+        photoFilePath = null
+        if (path == null) {
+            onPhotoCaptureError("Camera returned without a photo file")
+        } else if (result.resultCode == Activity.RESULT_OK) {
+            onPhotoCaptureSuccess(path)
+        } else {
+            File(path).delete()
+            if (result.resultCode == Activity.RESULT_CANCELED) {
                 onCancelPhoto()
+            } else {
+                onPhotoCaptureError("Unexpected camera result: ${result.resultCode}")
             }
         }
     }
@@ -54,18 +62,19 @@ class CameraUtil(
      * @param pageNumber the current document page number
      */
     @Throws(IOException::class)
-    fun openCamera(pageNumber: Int) {
+    fun openCamera(pageNumber: Int, scanID: String) {
         // create intent to launch camera
         val takePictureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
 
         // create new file for photo
-        val photoFile: File = FileUtil().createImageFile(activity, pageNumber)
+        val photoFile: File = FileUtil().createImageFile(activity, pageNumber, scanID)
 
         // store the photo file path, and send it back once the photo is saved
         photoFilePath = photoFile.absolutePath
+        onPhotoFileCreated(photoFile)
 
         // photo gets saved to this file path
-        val photoURI: Uri = FileProvider.getUriForFile(
+        val photoURI = FileProvider.getUriForFile(
             activity,
             "${activity.packageName}.DocumentScannerFileProvider",
             photoFile
