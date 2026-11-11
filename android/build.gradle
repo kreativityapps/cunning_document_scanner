@@ -39,6 +39,7 @@ android {
 
     defaultConfig {
         minSdk 21
+        consumerProguardFiles 'consumer-rules.pro'
     }
 }
 
@@ -49,5 +50,10 @@ kotlin {
 }
 
 dependencies {
-    implementation 'com.google.android.gms:play-services-mlkit-document-scanner:16.0.0'
+    implementation('com.google.android.gms:play-services-mlkit-document-scanner') {
+        version {
+            // The launch recovery depends on the delegate implementation in this version.
+            strictly '16.0.0'
+        }
+    }
 }

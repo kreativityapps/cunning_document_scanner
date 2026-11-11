@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.IntentSender
+import android.os.Bundle
 import androidx.core.app.ActivityCompat
 import biz.cunning.cunning_document_scanner.fallback.DocumentScannerActivity
 import biz.cunning.cunning_document_scanner.fallback.constants.DocumentScannerExtra
@@ -13,6 +14,7 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.RESULT_
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions.SCANNER_MODE_BASE
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
+import com.google.mlkit.vision.documentscanner.internal.GmsDocumentScanningDelegateActivity
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -20,6 +22,8 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugin.common.PluginRegistry
+
+private const val ML_KIT_SCANNER_UNAVAILABLE = Activity.RESULT_FIRST_USER
 
 /** CunningDocumentScannerPlugin */
 class CunningDocumentScannerPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, ActivityAware {
@@ -29,6 +33,7 @@ class CunningDocumentScannerPlugin : FlutterPlugin, MethodChannel.MethodCallHand
     private var scanId = 0L
     private var requestCode = 0x3600
     private var pendingRequestCode: Int? = null
+    private var pendingPageLimit: Int? = null
     private var usingFallback = false
     private var deferredLaunch: (() -> Unit)? = null
     private lateinit var channel: MethodChannel
@@ -40,6 +45,14 @@ class CunningDocumentScannerPlugin : FlutterPlugin, MethodChannel.MethodCallHand
             try {
                 when (resultCode) {
                     Activity.RESULT_CANCELED -> complete(emptyList())
+                    ML_KIT_SCANNER_UNAVAILABLE -> {
+                        val pageLimit = pendingPageLimit
+                        if (usingFallback || pageLimit == null) {
+                            fail("ERROR", "Unexpected document scanner result: $resultCode")
+                        } else {
+                            launchFallbackScanner(scanId, pageLimit)
+                        }
+                    }
                     Activity.RESULT_OK -> {
                         val error = data?.getStringExtra("error")
                         if (error != null) {
@@ -98,6 +111,7 @@ class CunningDocumentScannerPlugin : FlutterPlugin, MethodChannel.MethodCallHand
         // A late Activity result from an abandoned scan must not finish a newer request.
         requestCode = if (requestCode >= 0x7fff) 0x3600 else requestCode + 1
         pendingRequestCode = requestCode
+        pendingPageLimit = noOfPages
         usingFallback = false
         startScan(scanId, noOfPages, call.argument<Boolean>("isGalleryImportAllowed") ?: false)
     }
@@ -106,6 +120,7 @@ class CunningDocumentScannerPlugin : FlutterPlugin, MethodChannel.MethodCallHand
         val result = pendingResult ?: return
         pendingResult = null
         pendingRequestCode = null
+        pendingPageLimit = null
         deferredLaunch = null
         usingFallback = false
         if (errorCode == null) result.success(paths) else result.error(errorCode, message, null)
@@ -220,5 +235,23 @@ class CunningDocumentScannerPlugin : FlutterPlugin, MethodChannel.MethodCallHand
     private fun removeActivityResultListener() {
         binding?.removeActivityResultListener(resultListener)
         binding = null
+    }
+}
+
+/** Handles a missing Play services activity at the point ML Kit launches it. */
+class DocumentScanningDelegateActivity : GmsDocumentScanningDelegateActivity() {
+    @Deprecated("Invoked by the ML Kit delegate through AndroidX's Activity Result API")
+    override fun startActivityForResult(intent: Intent, requestCode: Int, options: Bundle?) {
+        try {
+            super.startActivityForResult(intent, requestCode, options)
+        } catch (exception: ActivityNotFoundException) {
+            if (intent.action != "com.google.android.gms.mlkit.ACTION_SCAN_DOCUMENT" ||
+                intent.`package` != "com.google.android.gms"
+            ) {
+                throw exception
+            }
+            setResult(ML_KIT_SCANNER_UNAVAILABLE)
+            finish()
+        }
     }
 }

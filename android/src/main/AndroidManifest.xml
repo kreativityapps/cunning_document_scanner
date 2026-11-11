@@ -1,13 +1,29 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     package="biz.cunning.cunning_document_scanner">
+    <queries>
+        <intent>
+            <action android:name="com.google.android.gms.mlkit.ACTION_SCAN_DOCUMENT" />
+        </intent>
+    </queries>
+
     <application android:theme="@style/Theme.AppCompat.NoActionBar">
 
-        <!-- Override ML Kit orientation restriction -->
+        <!-- ML Kit's pending intent targets this component by name. -->
         <activity
             android:name="com.google.mlkit.vision.documentscanner.internal.GmsDocumentScanningDelegateActivity"
-            tools:replace="screenOrientation"
-            android:screenOrientation="unspecified" />
+            tools:node="remove" />
+
+        <activity
+            android:name=".DocumentScanningDelegateActivity"
+            android:exported="false"
+            android:screenOrientation="unspecified"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
+
+        <activity-alias
+            android:name="com.google.mlkit.vision.documentscanner.internal.GmsDocumentScanningDelegateActivity"
+            android:exported="false"
+            android:targetActivity=".DocumentScanningDelegateActivity" />
 
         <activity
             android:name=".fallback.DocumentScannerActivity"
